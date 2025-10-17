@@ -50,17 +50,13 @@ jobs:
         fi
 
         if [ -n "${REMOTE_CLIENT_CERT}" ]; then
-          echo "${REMOTE_CLIENT_CERT}" > client.crt
-          amc config trust add client.crt
+          echo "${REMOTE_CLIENT_CERT}" | amc auth identity create tls/test-user -
         else
-          amc config trust add "$HOME/snap/anbox-cloud-appliance/current/client/client.crt"
+          amc auth identity create tls/test-user - < "$HOME/snap/anbox-cloud-appliance/current/client/client.crt"
         fi
 
-        if [ -n "${GH_RUNNER_CERT}" ] && [ -n "${GH_RUNNER_KEY}" ]; then
-          echo "${GH_RUNNER_CERT}" > runner.crt
-          echo "${GH_RUNNER_KEY}" > runner.key
-          cat runner.crt runner.key > runner.pem
-          amc config trust add runner.pem
+        if [ -n "${GH_RUNNER_CERT}" ]; then
+          echo "${GH_RUNNER_CERT}" | amc auth identity create tls/test-user -
         fi
 
         amc remote add server "${url}"
@@ -125,15 +121,15 @@ jobs:
         sudo snap logs -n all anbox-cloud-appliance > appliance.log
         sudo anbox-cloud-appliance.buginfo > appliance.buginfo
         status=$(amc show "$id" --format=json | jq -r .status)
-          if [ "$status" = error ] ; then
-            for log in $(amc show "$id" --format=json | jq -r '.stored_logs[]' | xargs) ; do
-              amc show-log "$id" "$log" |& tee -a "$id"_"$log"
-            done
-          elif [ "$status" = started ] || [ "$status" = running ]; then
-            for name in android anbox ; do
-              timeout 30s amc logs "$id" -t "$name" |& tee -a "$id"_"$name".log
-            done
-          fi
+        if [ "$status" = error ] ; then
+          for log in $(amc show "$id" --format=json | jq -r '.stored_logs[]' | xargs) ; do
+            amc show-log "$id" "$log" |& tee -a "$id"_"$log"
+          done
+        elif [ "$status" = started ] || [ "$status" = running ]; then
+          for name in android anbox ; do
+            timeout 30s amc logs "$id" -t "$name" |& tee -a "$id"_"$name".log
+          done
+        fi
 
     - name: Upload Logs
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
