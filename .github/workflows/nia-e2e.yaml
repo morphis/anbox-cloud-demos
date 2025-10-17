@@ -30,30 +30,40 @@ jobs:
     - name: Setup remote amc
       env:
         REMOTE_AMC_URL: ${{ vars.REMOTE_AMC_URL }}
-        REMOTE_SERVER_CERT: ${{ secrets.REMOTE_SERVER_CERT }}
-        REMOTE_CLIENT_CERT: ${{ secrets.REMOTE_CLIENT_CERT }}
-        REMOTE_CLIENT_KEY: ${{ secrets.REMOTE_CLIENT_KEY }}
+        REMOTE_SERVER_CERT: ${{ secrets.REMOTE_SERVER_CERT }} # ams.crt
+        REMOTE_CLIENT_CERT: ${{ secrets.REMOTE_CLIENT_CERT }} # client.crt
+        GH_RUNNER_CERT: ${{ secrets.GH_RUNNER_CERT }} # runner.crt
+        GH_RUNNER_KEY: ${{ secrets.GH_RUNNER_KEY }} # runner.key
+        
       run: |
         set -x
 
-        dir="$HOME/snap/anbox-cloud-appliance/current/client"
         url=${REMOTE_AMC_URL}
         if [ -z "${url}" ]; then
-            url="https://$(amc config show | grep -Po 'core\.https_address:\s*\K.*')"
-            amc config trust add "${dir}/client.crt"
+          url="https://$(amc config show | grep -Po 'core\.https_address:\s*\K.*')"
         fi
 
-        if [[ -n "${REMOTE_CLIENT_CERT}" && -n "${REMOTE_CLIENT_KEY}" ]]; then
-          pem="${REMOTE_CLIENT_CERT}"$'\n'"${REMOTE_CLIENT_KEY}"
-          echo "${pem}" | amc auth identity create tls/test-user -
+        if [ -n "${REMOTE_SERVER_CERT}" ]; then 
+          mkdir -p "$HOME/snap/anbox-cloud-appliance/current/client/servercerts"
+          echo "${REMOTE_SERVER_CERT}" > "$HOME/snap/anbox-cloud-appliance/current/client/servercerts/server.crt"
+          amc config trust add "$HOME/snap/anbox-cloud-appliance/current/client/servercerts/server.crt"
         fi
 
-        if [ -n "${REMOTE_SERVER_CERT}" ]; then
-          mkdir -p "${dir}/servercerts"
-          echo "$REMOTE_SERVER_CERT" > ${dir}/servercerts/server.crt
+        if [ -n "${REMOTE_CLIENT_CERT}" ]; then
+          echo "${REMOTE_CLIENT_CERT}" > client.crt
+          amc config trust add client.crt
+        else
+          amc config trust add "$HOME/snap/anbox-cloud-appliance/current/client/client.crt"
         fi
 
-        amc remote add --accept-certificate server "${url}"
+        if [ -n "${GH_RUNNER_CERT}" ] && [ -n "${GH_RUNNER_KEY}" ]; then
+          echo "${GH_RUNNER_CERT}" > runner.crt
+          echo "${GH_RUNNER_KEY}" > runner.key
+          cat runner.crt runner.key > runner.pem
+          amc config trust add runner.pem
+        fi
+
+        amc remote add server "${url}"
         amc remote set-default server
 
     - name: Restore cached images
@@ -70,15 +80,13 @@ jobs:
     - name: Create android instance
       id: create-instance
       run: |
-        sudo snap restart anbox-cloud-appliance.ams
-        sleep 30
         id="$(amc launch --enable-streaming jammy:android${ANDROID_VERSION}:amd64)"
         amc wait -c status=running "$id"
         echo "id=$id" >> "$GITHUB_OUTPUT"
 
     - name: Connect over adb
       run: |
-        set -x
+        sudo apt install -y adb
 
         id=${{ steps.create-instance.outputs.id }}
         rm -fr logs && mkdir -p logs
@@ -110,10 +118,37 @@ jobs:
         name: nia-e2e-test-reports
         path: '**/build/reports/androidTests/**'
         
+    - name: Dump logs
+      if: failure()
+      run: |
+        id=${{ steps.create-instance.outputs.id }}
+        sudo snap logs -n all anbox-cloud-appliance > appliance.log
+        sudo anbox-cloud-appliance.buginfo > appliance.buginfo
+        status=$(amc show "$id" --format=json | jq -r .status)
+          if [ "$status" = error ] ; then
+            for log in $(amc show "$id" --format=json | jq -r '.stored_logs[]' | xargs) ; do
+              amc show-log "$id" "$log" |& tee -a "$id"_"$log"
+            done
+          elif [ "$status" = started ] || [ "$status" = running ]; then
+            for name in android anbox ; do
+              timeout 30s amc logs "$id" -t "$name" |& tee -a "$id"_"$name".log
+            done
+          fi
+
+    - name: Upload Logs
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      if: always()
+      with:
+        name: logs-dump-${{ github.run_id }}
+        path: |
+                appliance.buginfo
+                *.log
+        retention-days: 30
+
     - name: Clean up android instance
       if: always()
       run: |
         id=${{ steps.create-instance.outputs.id }}
-        amc delete -y "$id"
-      
-       
+        if [ -n "$id" ]; then
+          amc delete -y "$id"
+        fi
