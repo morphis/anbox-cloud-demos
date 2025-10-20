@@ -2,7 +2,7 @@ name: Now in Android E2E
 
 on:
   workflow_call:
-  
+
 permissions:
   contents: read
 
@@ -13,7 +13,7 @@ jobs:
     env:
         ANDROID_VERSION: "15"
     timeout-minutes: 60
-    
+
     steps:
     - name: Checkout
       uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -30,36 +30,46 @@ jobs:
     - name: Setup remote amc
       env:
         REMOTE_AMC_URL: ${{ vars.REMOTE_AMC_URL }}
-        REMOTE_SERVER_CERT: ${{ secrets.REMOTE_SERVER_CERT }} # ams.crt
-        REMOTE_CLIENT_CERT: ${{ secrets.REMOTE_CLIENT_CERT }} # client.crt
-        GH_RUNNER_CERT: ${{ secrets.GH_RUNNER_CERT }} # runner.crt
-        GH_RUNNER_KEY: ${{ secrets.GH_RUNNER_KEY }} # runner.key
-        
+        REMOTE_SERVER_CERT: ${{ secrets.REMOTE_SERVER_CERT }}
+        GH_RUNNER_CERT: ${{ secrets.GH_RUNNER_CERT }}
+        GH_RUNNER_KEY: ${{ secrets.GH_RUNNER_KEY }}
       run: |
         set -x
 
+        amc_state_dir="$HOME"/snap/anbox-cloud-appliance/current/client
         url=${REMOTE_AMC_URL}
+
+        if [ -n "${GH_RUNNER_CERT}" ] && [ -n "${GH_RUNNER_KEY}" ]; then
+          echo "${GH_RUNNER_CERT}" > "$amc_state_dir"/client.crt
+          echo "${GH_RUNNER_KEY}" > "$amc_state_dir"/client.key
+        fi
+
         if [ -z "${url}" ]; then
           url="https://$(amc config show | grep -Po 'core\.https_address:\s*\K.*')"
+
+          amc auth identity create tls/test-user - < \
+            "$amc_state_dir"/client.crt
         fi
 
-        if [ -n "${REMOTE_SERVER_CERT}" ]; then 
-          mkdir -p "$HOME/snap/anbox-cloud-appliance/current/client/servercerts"
-          echo "${REMOTE_SERVER_CERT}" > "$HOME/snap/anbox-cloud-appliance/current/client/servercerts/server.crt"
-          amc config trust add "$HOME/snap/anbox-cloud-appliance/current/client/servercerts/server.crt"
-        fi
 
-        if [ -n "${REMOTE_CLIENT_CERT}" ]; then
-          echo "${REMOTE_CLIENT_CERT}" | amc auth identity create tls/test-user -
+        mkdir -p "$amc_state_dir"/servercerts
+        server_crt_path="$amc_state_dir"/servercerts/server.crt
+        if [ -n "${REMOTE_SERVER_CERT}" ]; then
+          echo "${REMOTE_SERVER_CERT}" > "$server_crt_path"
         else
-          amc auth identity create tls/test-user - < "$HOME/snap/anbox-cloud-appliance/current/client/client.crt"
+          # We use cat to write the file with the current users ownership
+          sudo cat /var/snap/anbox-cloud-appliance/common/ams/server/ams.crt > \
+            "$server_crt_path"
         fi
 
-        if [ -n "${GH_RUNNER_CERT}" ]; then
-          echo "${GH_RUNNER_CERT}" | amc auth identity create tls/test-user -
-        fi
+        # FIXME: workaround lp#2129004. Once fixed we can switch back to
+        # amc remote add server "${url}"
+        cat << EOF >> "$amc_state_dir"/settings.yaml
+          server:
+            url: "${url}"
+            auth-type: tls
+        EOF
 
-        amc remote add server "${url}"
         amc remote set-default server
 
     - name: Restore cached images
@@ -68,7 +78,7 @@ jobs:
         path: images
         key: anbox-images-amd64
         fail-on-cache-miss: true
-  
+
     - name: Import cached images
       run: |
         amc image add jammy:android${ANDROID_VERSION}:amd64 ./images/android${ANDROID_VERSION}.tar.xz
@@ -97,9 +107,9 @@ jobs:
           done
           return 1
         }
-        
+
         wait_for_adb_connect
-        url=$(grep -oP 'adb connect\s*\K.*' logs/anbox-connect.log)                  
+        url=$(grep -oP 'adb connect\s*\K.*' logs/anbox-connect.log)
         adb connect "${url}"
 
     - name: Run e2e tests
@@ -113,7 +123,7 @@ jobs:
       with:
         name: nia-e2e-test-reports
         path: '**/build/reports/androidTests/**'
-        
+
     - name: Dump logs
       if: failure()
       run: |
